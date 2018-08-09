@@ -1,52 +1,79 @@
-import cats.data.EitherT
 import scalaz.zio.{IO, _}
-import scalaz.zio.interop._
 
 import scala.concurrent.duration.Duration
-import scala.language.higherKinds
+import scala.language.{higherKinds, implicitConversions}
 
-object Instances {
-  type Container[V] = IO[Throwable, V]
+trait WithResult {
+  type RAlt[E, R]
+  type RUni[R]
+}
 
-  implicit object f extends cats.Applicative[Container] {
-    override def map[A, B](fa: Container[A])(f: A => B): Container[B] = fa.map(f)
+object XIO {
+  type XRAlt[E, V] = IO[Either[Throwable, E], V]
+  type XRUni[V] = IO[Left[Throwable, Nothing], V]
 
-    override def pure[A](x: A): Container[A] = IO.point(x)
+  implicit def convert[L, R](io: IO[Throwable, Either[L, R]]): XRAlt[L, R] = {
+    io.redeem[Either[Throwable, L], R](t => IO.fail(Left(t)), {
+      case Left(v) =>
+        IO.fail(Right(v))
+      case Right(v) =>
+        IO.point(v)
+    })
+  }
 
-    override def ap[A, B](ff: Container[A => B])(fa: Container[A]): Container[B] = ff.flatMap {
-      fab =>
-        fa.map {
-          a =>
-            fab(a)
-        }
-    }
+  implicit def convert1[R](io: IO[Throwable, R]): XRUni[R] = {
+    io.redeem[Left[Throwable, Nothing], R](t => IO.fail(Left(t)), v => IO.point(v))
+  }
+
+  def apply[L, R](v: => Either[L, R]): XRAlt[L, R] = {
+    IO.syncThrowable(v)
+  }
+
+  def unary[R](v: => R): XRUni[R] = {
+    IO.syncThrowable(v)
   }
 }
 
-trait Service {
-  type Container[V]
-  type RAlt[E, R]
-  type RUni[R]
-
+trait Service extends WithResult {
   sealed trait AnError
+
   object AnError {
     case class SomeError() extends AnError
   }
 
-  def throwing(): RAlt[AnError, Long]
-  def unary(): RUni[Long]
+  def unary1(): RUni[Long]
+  def unary2(): RUni[Long]
+
+  def alternative1(): RAlt[AnError, Long]
+  def alternative2(): RAlt[AnError, Long]
+  def alternative3(): RAlt[AnError, Long]
+
 }
 
 class ServiceImpl extends Service {
-  type Container[V] = IO[Throwable, V]
-  type RAlt[E, R] = EitherT[Container, E, R]
-  type RUni[R] = Container[R]
+  import XIO._
+  type RAlt[E, V] = XRAlt[E, V]
+  type RUni[V] = XRUni[V]
 
-  import Instances._
+  override def unary1(): RUni[Long] = XIO.unary {
+    99
+  }
 
-  override def throwing(): RAlt[AnError, Long] = EitherT.fromEither(Right(0L))
+  override def unary2(): RUni[Long] = XIO.unary {
+    ???
+  }
 
-  override def unary(): RUni[Long] = IO.point(99)
+  override def alternative1(): RAlt[AnError, Long] = XIO {
+    Right(0L)
+  }
+
+  override def alternative2(): RAlt[AnError, Long] = XIO {
+    Left(AnError.SomeError())
+  }
+
+  override def alternative3(): RAlt[AnError, Long] = XIO {
+    ???
+  }
 }
 
 object MyApp {
@@ -65,20 +92,24 @@ object MyApp {
 
   def run(args: List[String]): IO[Void, MyApp.ExitStatus] = {
     myAppLogic
-      .attempt.map(_.fold(_ => 1, _ => 0))
+      .attempt.map(_.fold(t =>{ println(t) ;1}, _ => 0))
       .map(ExitStatus.ExitNow)
   }
 
-
-
-  def myAppLogic: IO[Throwable, Unit] = {
+  def myAppLogic: IO[Either[Throwable, Service#AnError], Unit] = {
     val service = new ServiceImpl()
     for {
-      _ <- service.unary()
-    } yield ()
+      u1 <- service.unary1()
+      a1 <- service.alternative1()
+//      a2 <- service.alternative2()
+//      u2 <- service.unary2()
+//      a3 <- service.alternative3()
+    } yield {
+      println(u1)
+      println(a1)
+      ()
+    }
   }
-
-
 
   def main(args: Array[String]): Unit = {
     object io extends RTS
