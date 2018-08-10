@@ -23,6 +23,32 @@ trait ZioResult extends WithResult {
     }
   }
 
+  implicit class ZioRecover[E, A](val io: IO[E, A]) {
+    def recoverTerminated(recoverWith: Throwable => A): IO[E, A] =
+      io.run.flatMap {
+        case ExitResult.Terminated(e :: _) =>
+          IO.point(recoverWith(e))
+        case ExitResult.Failed(error, defects) =>
+          throw new RuntimeException("dunno") // FIXME
+        case ExitResult.Completed(value) =>
+          IO.point[A](value)
+      }
+
+    def recoverAll(recoverWith: Case => A): IO[E, A] =
+      io.run.flatMap {
+        case ExitResult.Terminated(e :: _) =>
+          IO.point(recoverWith(CaseTerminate(e)))
+        case ExitResult.Failed(error, _) =>
+          IO.point(recoverWith(CaseError(error)))
+        case ExitResult.Completed(value) =>
+          IO.point[A](value)
+      }
+
+    sealed trait Case
+    final case class CaseError[EE](error: EE) extends Case
+    final case class CaseTerminate(error: Throwable) extends Case
+  }
+
   implicit class ZioExt[R](val io: IO[Throwable, R]) {
     implicit def trifunctor: Just[R] = {
       io.redeem[Left[Throwable, Nothing], R](t => IO.fail(Left(t)), v => IO.point(v))
